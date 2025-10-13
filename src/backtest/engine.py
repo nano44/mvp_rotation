@@ -1,8 +1,9 @@
 from __future__ import annotations
 import numpy as np, pandas as pd, yaml
+import os
 from dataclasses import dataclass
 from src.utils.common import set_seed
-from src.data.loaders import load_synthetic_sector_returns, load_benchmark_weights, SECTORS
+from src.data.loaders import load_synthetic_sector_returns, load_benchmark_weights, load_sector_returns_from_csv
 from src.features.classic import make_classic_features
 from src.risk.cov import estimate_cov
 from src.portfolio.optimizer import solve_overlay
@@ -24,9 +25,37 @@ def run_backtest(config_path: str) -> Results:
     set_seed(cfg["seed"])
     start, end = cfg["dates"]["start"], cfg["dates"]["end"]
 
-    # 1) load synthetic returns & benchmark weights
-    df_ret = load_synthetic_sector_returns(start, end, cfg["seed"])
-    df_wb  = load_benchmark_weights(start, end)
+    # Universe from config
+    SECTORS = cfg.get("universe", {}).get("sectors", [])
+    if not SECTORS:
+        raise ValueError("Config 'universe.sectors' must list tickers (e.g., ['XLY','XLP',...]).")
+
+    # 1) load returns & benchmark weights based on config
+    data_source = cfg.get("data", {}).get("source", "synthetic")
+    if data_source == "csv":
+        path = cfg.get("data", {}).get("csv_folder", "data/raw")
+        # if a single CSV file path is provided, load the wide CSV; otherwise treat as a folder
+        if os.path.isfile(path):
+            from src.data.loaders import load_sector_returns_from_wide_csv
+            df_ret = load_sector_returns_from_wide_csv(path, SECTORS, start, end)
+        else:
+            df_ret = load_sector_returns_from_csv(path, SECTORS, start, end)
+    else:
+        df_ret = load_synthetic_sector_returns(start, end, cfg["seed"], sectors=SECTORS)
+    df_wb  = load_benchmark_weights(start, end, sectors=SECTORS)
+
+    # ---- INFO: report data source and dataset shape/range ----
+    if data_source == "csv":
+        if os.path.isfile(path):
+            print(f"[INFO] Data source: CSV (wide file) → {path}")
+        else:
+            print(f"[INFO] Data source: CSV (folder)    → {path}")
+    else:
+        print(f"[INFO] Data source: SYNTHETIC (seed={cfg['seed']})")
+    print(f"[INFO] Dataset: {df_ret.shape[0]} months × {df_ret.shape[1]} sectors | "
+          f"range {df_ret.index.min().date()} → {df_ret.index.max().date()}")
+    print(f"[INFO] Sectors: {list(df_ret.columns)}")
+    # ---- END INFO ----
 
     # 2) build feature panel (classic)
     X = make_classic_features(df_ret)  # MultiIndex (date, sector)
@@ -157,5 +186,17 @@ def run_backtest(config_path: str) -> Results:
 
     pnl = pd.concat(pnl) ; pnl_net = pd.concat(pnl_net)
     turnover = pd.concat(turnover) ; te_ann = pd.concat(te_ann)
+
+    # ---- save monthly weights to CSV ----
+    try:
+        os.makedirs("output", exist_ok=True)
+        weights_df = pd.DataFrame.from_dict(weights, orient="index", columns=SECTORS).sort_index()
+        # ensure datetime index
+        weights_df.index = pd.to_datetime(weights_df.index)
+        weights_df.to_csv("output/weights.csv")
+        print(f"[INFO] Saved weights to output/weights.csv ({weights_df.shape[0]} rows × {weights_df.shape[1]} sectors).")
+    except Exception as e:
+        print(f"[WARN] Could not save weights.csv: {e}")
+    # ---- end weights export ----
 
     return Results(pnl=pnl, pnl_net=pnl_net, turnover=turnover, te_ann=te_ann, weights=weights)
