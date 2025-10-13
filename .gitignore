@@ -23,5 +23,5 @@ data/raw/
 # IDE settings
 .vscode/
 # data & outputs (do not commit)
-data/
-output/
+/data/
+/output/
