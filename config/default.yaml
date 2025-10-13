@@ -1,0 +1,19 @@
+seed: 42
+dates:
+  start: "2005-01-31"
+  end:   "2024-12-31"
+universe:
+  sectors: ["XLY","XLP","XLE","XLF","XLV","XLI","XLB","XLK","XLU","XLRE","XLC"]  # 11 sectors (SPDR tickers)
+portfolio:
+  te_target_annual: 0.055       # ~5.5% tracking error target
+  turnover_cap: 0.35            # 35% one-way cap per month
+  smoothing_lambda: 0.30        # EMA on active weights
+  crisis_vix_threshold: 35.0    # if VIX > 35, use lower lambda (0.1 inside code)
+costs:
+  one_way_bps: 2.0              # 2 bps per one-way trade (conservative)
+evaluation:
+  warmup_months: 60
+  purge_months: 1
+  embargo_months: 1
+features:
+  use_value_proxy: false        # keep off for now; we’ll enable later
