@@ -1,27 +1,16 @@
-# venv & OS
+# Python / venv
+__pycache__/
+*.py[cod]
+*.egg-info/
 .venv/
+
+# OS junk
 .DS_Store
 
-# Python build junk
-__pycache__/
-*.pyc
-*.pyo
-*.pyd
-*.egg-info/
-
-# Notebooks (if you add them later)
-.ipynb_checkpoints/
-
-# Project artifacts (reproducible)
-output/
-data/interim/
-data/features/
-
-# Raw data (often large / private) — keep out of Git by default
-data/raw/
-
-# IDE settings
+# IDE
 .vscode/
-# data & outputs (do not commit)
-data/
-output/
+.idea/
+
+# Project artifacts (root only)
+ /data/
+ /output/
