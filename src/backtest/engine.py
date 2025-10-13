@@ -8,6 +8,8 @@ from src.features.classic import make_classic_features
 from src.risk.cov import estimate_cov
 from src.portfolio.optimizer import solve_overlay
 
+from src.data import master_api
+
 from sklearn.linear_model import Ridge
 from sklearn.pipeline import make_pipeline
 from sklearn.impute import SimpleImputer
@@ -25,40 +27,47 @@ def run_backtest(config_path: str) -> Results:
     set_seed(cfg["seed"])
     start, end = cfg["dates"]["start"], cfg["dates"]["end"]
 
-    # Universe from config
-    SECTORS = cfg.get("universe", {}).get("sectors", [])
-    if not SECTORS:
-        raise ValueError("Config 'universe.sectors' must list tickers (e.g., ['XLY','XLP',...]).")
+    # 1) load returns & benchmark weights based on data source
+    data_cfg    = cfg.get("data", {})
+    data_source = data_cfg.get("source", "csv")
+    master_root = data_cfg.get("master_root", "data/master")
 
-    # 1) load returns & benchmark weights based on config
-    data_source = cfg.get("data", {}).get("source", "synthetic")
-    if data_source == "csv":
-        path = cfg.get("data", {}).get("csv_folder", "data/raw")
-        # if a single CSV file path is provided, load the wide CSV; otherwise treat as a folder
-        if os.path.isfile(path):
-            from src.data.loaders import load_sector_returns_from_wide_csv
-            df_ret = load_sector_returns_from_wide_csv(path, SECTORS, start, end)
-        else:
-            df_ret = load_sector_returns_from_csv(path, SECTORS, start, end)
+    # Universe from config (robust; no global dependency)
+    sectors = cfg.get("universe", {}).get("sectors")
+    if not sectors:
+        try:
+            from src.data.loaders import SECTORS as DEFAULT_SECTORS
+            sectors = DEFAULT_SECTORS
+        except Exception:
+            raise ValueError("Config 'universe.sectors' is missing and no default SECTORS found.")
+    
+    if data_source == "master":
+        # load from master database
+        df_ret = master_api.load_returns_wide(master_root, sectors)
+        df_wb  = master_api.load_benchmark_weights_wide(master_root, sectors)
+        X      = master_api.load_features_panel(
+                    master_root,
+                    cfg.get("features", {}).get("names", []),
+                    cfg.get("features", {}).get("version", "v1.0.0"),
+                    sectors
+                )
+        X.index.set_names(["date","sector"], inplace=True)
+    elif data_source == "csv":
+        # CSV wide-file path you already use
+        from src.data.loaders import load_sector_returns_from_csv, load_benchmark_weights
+        df_ret = load_sector_returns_from_csv(data_cfg.get("csv_folder"), sectors, start, end)
+        df_wb  = load_benchmark_weights(start, end)
+        X      = make_classic_features(df_ret)
     else:
-        df_ret = load_synthetic_sector_returns(start, end, cfg["seed"], sectors=SECTORS)
-    df_wb  = load_benchmark_weights(start, end, sectors=SECTORS)
-
-    # ---- INFO: report data source and dataset shape/range ----
-    if data_source == "csv":
-        if os.path.isfile(path):
-            print(f"[INFO] Data source: CSV (wide file) → {path}")
-        else:
-            print(f"[INFO] Data source: CSV (folder)    → {path}")
-    else:
-        print(f"[INFO] Data source: SYNTHETIC (seed={cfg['seed']})")
-    print(f"[INFO] Dataset: {df_ret.shape[0]} months × {df_ret.shape[1]} sectors | "
-          f"range {df_ret.index.min().date()} → {df_ret.index.max().date()}")
-    print(f"[INFO] Sectors: {list(df_ret.columns)}")
-    # ---- END INFO ----
+        # synthetic fallback
+        from src.data.loaders import load_synthetic_sector_returns, load_benchmark_weights
+        df_ret = load_synthetic_sector_returns(start, end, cfg["seed"])
+        df_wb  = load_benchmark_weights(start, end)
+        X      = make_classic_features(df_ret)
 
     # 2) build feature panel (classic)
-    X = make_classic_features(df_ret)  # MultiIndex (date, sector)
+    if data_source != "master":
+        X = make_classic_features(df_ret)  # MultiIndex (date, sector)
 
     # 3) training/evaluation windows
     warmup = cfg["evaluation"]["warmup_months"]
@@ -69,7 +78,10 @@ def run_backtest(config_path: str) -> Results:
     turnover = []
     te_ann = []
     weights = {}
-    w_prev = df_wb.iloc[0].values  # start from benchmark
+    preds = {}  # date -> pd.Series of predicted sector excess returns
+    db_cov_used = 0
+    fb_cov_used = 0
+    w_prev = df_wb.iloc[0].reindex(sectors).values  # start from benchmark
 
     cost_bps = cfg["costs"]["one_way_bps"]
     te_target = cfg["portfolio"]["te_target_annual"]
@@ -90,7 +102,7 @@ def run_backtest(config_path: str) -> Results:
         candidate_dates = unique_dates[:-1]  # exclude asof itself
         for d in candidate_dates:
             # features at date d (sectors x features), enforce sector order
-            row_df = Xi.loc[d].reindex(SECTORS)
+            row_df = Xi.loc[d].reindex(sectors)
             # skip if any NaNs in this date's feature block
             if row_df.isna().values.any():
                 continue
@@ -99,13 +111,14 @@ def run_backtest(config_path: str) -> Results:
                 continue
 
             # next month returns (excess vs benchmark)
-            r_next = df_ret.loc[next_date]
-            r_bmk  = (df_wb.loc[next_date] * df_ret.loc[next_date]).sum()
+            r_next = df_ret.loc[d + pd.offsets.MonthEnd(1)].reindex(sectors)
+            r_bmk  = (df_wb.loc[d + pd.offsets.MonthEnd(1)].reindex(sectors) * r_next).sum()
             y = r_next - r_bmk
 
-            X_train.append(row_df.values)                 # shape (11, n_feat)
-            y_train.append(y.reindex(SECTORS).values)     # shape (11,)
-
+            row = Xi.loc[d]                  # Xi is X filtered up to asof
+            row = row.reindex(sectors)       # ensure consistent sector order
+            X_train.append(row.values)
+            y_train.append(y.reindex(sectors).values)
         if len(X_train) == 0:
             # not enough clean data yet; skip this month
             continue
@@ -139,7 +152,7 @@ def run_backtest(config_path: str) -> Results:
 
         # fit forecaster and predict mu_hat for asof (next month)
         model.fit(X_train, y_train)
-        row_t = X.loc[asof].reindex(SECTORS).values  # features at t
+        row_t = X.loc[asof].reindex(sectors).values
 
         # impute current as-of feature matrix defensively (same column means as training if available)
         if np.isnan(row_t).any():
@@ -152,14 +165,26 @@ def run_backtest(config_path: str) -> Results:
 
         mu_hat = model.predict(row_t)
 
-        # risk model at t
-        Sigma = estimate_cov(df_ret, asof, lookback=60, shrink=0.1)
+        # store predictions for auditing
+        preds[asof] = pd.Series(mu_hat, index=sectors)
+
+        # risk model at t (Hybrid: try DB covariance first in master mode)
+        if data_source == "master":
+            Sigma = master_api.load_cov(master_root, asof, sectors)
+            if Sigma is None:
+                fb = cfg.get("risk", {}).get("fallback_lookback", 36)
+                Sigma = estimate_cov(df_ret, asof, lookback=fb, shrink=0.1)
+                fb_cov_used += 1
+            else:
+                db_cov_used += 1
+        else:
+            Sigma = estimate_cov(df_ret, asof, lookback=60, shrink=0.1)
 
         # crisis flag (synthetic proxy: high cross-sec vol)
         crisis = df_ret.loc[asof].std() > 0.10
 
         # optimize overlay weights
-        w_bench = df_wb.loc[asof].values
+        w_bench = df_wb.loc[asof].reindex(sectors).values
         w = solve_overlay(mu_hat, Sigma, w_bench, w_prev,
                           te_target, to_cap, lam, crisis)
 
@@ -168,8 +193,8 @@ def run_backtest(config_path: str) -> Results:
         cost = (cost_bps / 10000.0) * one_way
 
         # realize pnl next month (active return vs benchmark)
-        r_next = df_ret.loc[nxt].values
-        r_bmk  = df_wb.loc[nxt].values @ r_next
+        r_next  = df_ret.loc[nxt].reindex(sectors).values
+        r_bmk   = df_wb.loc[nxt].reindex(sectors).values @ r_next
         r_port = w @ r_next
         active = r_port - r_bmk
         active_net = active - cost
@@ -187,10 +212,24 @@ def run_backtest(config_path: str) -> Results:
     pnl = pd.concat(pnl) ; pnl_net = pd.concat(pnl_net)
     turnover = pd.concat(turnover) ; te_ann = pd.concat(te_ann)
 
+    # ---- save monthly predictions to CSV ----
+    try:
+        os.makedirs("output", exist_ok=True)
+        preds_df = pd.DataFrame.from_dict(preds, orient="index", columns=sectors).sort_index()
+        # ensure datetime index
+        preds_df.index = pd.to_datetime(preds_df.index)
+        preds_df.to_csv("output/preds.csv")
+        print(f"[INFO] Saved preds to output/preds.csv ({preds_df.shape[0]} rows × {preds_df.shape[1]} sectors).")
+    except Exception as e:
+        print(f"[WARN] Could not save preds.csv: {e}")
+
+    # ---- risk source usage summary ----
+    print(f"[INFO] Risk source usage — DB: {db_cov_used} months, Fallback: {fb_cov_used} months.")
+
     # ---- save monthly weights to CSV ----
     try:
         os.makedirs("output", exist_ok=True)
-        weights_df = pd.DataFrame.from_dict(weights, orient="index", columns=SECTORS).sort_index()
+        weights_df = pd.DataFrame.from_dict(weights, orient="index", columns=sectors).sort_index()
         # ensure datetime index
         weights_df.index = pd.to_datetime(weights_df.index)
         weights_df.to_csv("output/weights.csv")

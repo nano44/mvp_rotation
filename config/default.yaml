@@ -3,8 +3,9 @@ dates:
   start: "2005-01-31"
   end:   "2024-12-31"
 data:
-  source: "csv"
-  csv_folder: "data/raw/sector_etf_prices_monthly.csv"   # file path is OK
+  source: "master"                          # "master" | "csv" | "synthetic"
+  csv_folder: "data/raw/sector_etf_prices_monthly.csv"
+  master_root: "data/master"
 universe:
   sectors: ["XLY","XLP","XLE","XLF","XLV","XLI","XLB","XLK","XLU","XLRE","XLC"]  # 11 sectors (SPDR tickers)
 portfolio:
@@ -15,8 +16,11 @@ portfolio:
 costs:
   one_way_bps: 2.0              # 2 bps per one-way trade (conservative)
 evaluation:
-  warmup_months: 60
+  warmup_months: 36
   purge_months: 1
   embargo_months: 1
 features:
-  use_value_proxy: false        # keep off for now; we’ll enable later
+  names: ["mom_12_1","mom_6_1","mom_3_1","vol_12","vol_6"]
+  version: "v1.0.0"
+risk:
+  fallback_lookback: 36      # Hybrid: use this if a DB covariance month is missing
