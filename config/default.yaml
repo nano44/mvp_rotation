@@ -9,7 +9,7 @@ data:
 universe:
   sectors: ["XLY","XLP","XLE","XLF","XLV","XLI","XLB","XLK","XLU","XLRE","XLC"]  # 11 sectors (SPDR tickers)
 portfolio:
-  te_target_annual: 0.055       # ~5.5% tracking error target
+  te_target_annual: 0.071       # ~5.5% tracking error target
   turnover_cap: 0.35            # 35% one-way cap per month
   smoothing_lambda: 0.30        # EMA on active weights
   crisis_vix_threshold: 35.0    # if VIX > 35, use lower lambda (0.1 inside code)
@@ -20,7 +20,16 @@ evaluation:
   purge_months: 1
   embargo_months: 1
 features:
-  names: ["mom_12_1","mom_6_1","mom_3_1","vol_12","vol_6"]
+  names:
+    - mom_12_1
+    - mom_6_1
+    - mom_3_1
+    - vol_12
+    - vol_6
+    - g_deg_wpos_36m
+    - g_eigvec_wpos_36m
+    - g_cluster_wpos_36m
+    - cs_absdev_1m
   version: "v1.0.0"
 risk:
   fallback_lookback: 36      # Hybrid: use this if a DB covariance month is missing
