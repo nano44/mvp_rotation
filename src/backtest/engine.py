@@ -52,6 +52,7 @@ def run_backtest(config_path: str) -> Results:
                     sectors
                 )
         X.index.set_names(["date","sector"], inplace=True)
+        X = X.fillna(0.0)
     elif data_source == "csv":
         # CSV wide-file path you already use
         from src.data.loaders import load_sector_returns_from_csv, load_benchmark_weights
@@ -152,17 +153,9 @@ def run_backtest(config_path: str) -> Results:
 
         # fit forecaster and predict mu_hat for asof (next month)
         model.fit(X_train, y_train)
-        row_t = X.loc[asof].reindex(sectors).values
-
-        # impute current as-of feature matrix defensively (same column means as training if available)
+        row_t = X.loc[asof].reindex(sectors).fillna(0.0).values
         if np.isnan(row_t).any():
-            # compute means per feature from the already-imputed training matrix
-            train_means = X_train.mean(axis=0)
-            row_nan = np.isnan(row_t)
-            if row_nan.any():
-                # broadcast means to sector rows
-                row_t[row_nan] = train_means[np.where(row_nan)[1]]
-
+            raise RuntimeError(f"NaNs in as-of features at {asof.date()} after fillna(0.0)")
         mu_hat = model.predict(row_t)
 
         # store predictions for auditing
