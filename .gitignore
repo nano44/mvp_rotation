@@ -19,3 +19,4 @@ data/master/**/*.parquet
 output/**
 **/__pycache__/
 *.pyc
+repo_snapshot.txt
