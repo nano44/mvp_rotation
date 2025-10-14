@@ -30,7 +30,7 @@ features:
     - g_eigvec_wpos_36m
     - g_cluster_wpos_36m
     - cs_absdev_1m
-r  version: "v1.0.0"
+  version: "v1.0.0"
 model:
   # Rolling training window
   train_lookback_months: 84        # we’ll use L_t = min(this, available)
