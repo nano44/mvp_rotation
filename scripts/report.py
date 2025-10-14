@@ -74,6 +74,46 @@ def _hac_tstat_mean(series: "pd.Series", max_lag: int = 6):
     t = (np.sqrt(n) * mu) / np.sqrt(S)
     return float(t)
 
+# === Bootstrap helpers: Moving-Block Bootstrap (MBB) for CI ===
+
+def _annualized_ir(x: np.ndarray) -> float:
+    x = np.asarray(x, float)
+    sd = x.std(ddof=1)
+    return float(x.mean() / sd * np.sqrt(12.0)) if sd > 0 else np.nan
+
+
+def _mbb_indices(n: int, block_len: int, rng: np.random.Generator) -> np.ndarray:
+    """Circular moving-block bootstrap indices of length n with block_len.
+    We sample starting points uniformly and wrap around modulo n.
+    """
+    starts = rng.integers(0, n, size=max(1, int(np.ceil(n / block_len))))
+    idx = []
+    for s in starts:
+        block = (np.arange(block_len) + s) % n
+        idx.append(block)
+    idx = np.concatenate(idx)[:n]
+    return idx
+
+
+def _mbb_ci(x: "pd.Series", stat_fn, block_len: int = 6, B: int = 2000, alpha: float = 0.10, seed: int | None = None):
+    """Moving-block bootstrap CI for a statistic of a monthly-return series.
+    Returns (lo, hi) quantiles for (1-alpha) CI.
+    """
+    s = pd.Series(x).dropna().astype(float).values
+    n = len(s)
+    if n < 3:
+        return (np.nan, np.nan)
+    b = int(max(2, min(block_len, n)))
+    B = int(max(200, B))  # safety
+    rng = np.random.default_rng(seed)
+    stats = np.empty(B)
+    for bidx in range(B):
+        idx = _mbb_indices(n, b, rng)
+        stats[bidx] = stat_fn(s[idx])
+    lo = float(np.nanpercentile(stats, 100 * (alpha / 2)))
+    hi = float(np.nanpercentile(stats, 100 * (1 - alpha / 2)))
+    return lo, hi
+
 # Internal helpers from your repo
 from src.data import master_api
 from src.risk.cov import estimate_cov
@@ -387,12 +427,29 @@ if __name__ == "__main__":
         hac6  = _hac_tstat_mean(active_net, max_lag=6)
         hac12 = _hac_tstat_mean(active_net, max_lag=12)
 
+        # Bootstrap CI (moving-block) for IR and mean active
+        # Make bootstrap reproducible: seed from config (fallback 42), override via env BOOT_SEED
+        _B = int(os.getenv("BOOT_B", "2000"))
+        _seed_cfg = None
+        try:
+            _seed_cfg = _read_config("config/default.yaml").get("seed", None)
+        except Exception:
+            _seed_cfg = None
+        _SEED = int(os.getenv("BOOT_SEED", str(_seed_cfg) if _seed_cfg is not None else "42"))
+
+        ir_lo, ir_hi = _mbb_ci(active_net, _annualized_ir, block_len=6, B=_B, alpha=0.10, seed=_SEED)
+        mean_lo, mean_hi = _mbb_ci(active_net, lambda a: float(np.mean(a)), block_len=6, B=_B, alpha=0.10, seed=_SEED)
+
         row = {
             "BlockIR12_mean": blk12["ir_mean"],
             "BlockIR12_median": blk12["ir_median"],
             "BlockIR12_count": blk12["blocks"],
             "HAC_t_lag6": hac6,
             "HAC_t_lag12": hac12,
+            "IR_boot_ci90_lo": ir_lo,
+            "IR_boot_ci90_hi": ir_hi,
+            "Mean_boot_ci90_lo": mean_lo,
+            "Mean_boot_ci90_hi": mean_hi,
         }
 
         summary_path = "output/report_summary.csv"
@@ -412,7 +469,9 @@ if __name__ == "__main__":
         S.to_csv(summary_path, index=False)
         print(
             f"[REPORT] BlockIR12 mean={row['BlockIR12_mean']:.3f}, median={row['BlockIR12_median']:.3f}, n={row['BlockIR12_count']} | "
-            f"HAC t-stat (L=6)={row['HAC_t_lag6']:.2f}, (L=12)={row['HAC_t_lag12']:.2f}"
+            f"HAC t-stat (L=6)={row['HAC_t_lag6']:.2f}, (L=12)={row['HAC_t_lag12']:.2f} | "
+            f"IR 90% CI=({row['IR_boot_ci90_lo']:.2f},{row['IR_boot_ci90_hi']:.2f}), Mean 90% CI=({row['Mean_boot_ci90_lo']:.4f},{row['Mean_boot_ci90_hi']:.4f}) | "
+            f"boot B={_B}, seed={_SEED}"
         )
     except Exception as _e:
         print(f"[WARN] Stronger stats computation skipped: {_e}")
