@@ -11,8 +11,6 @@ from src.portfolio.optimizer import solve_overlay
 from src.data import master_api
 
 from sklearn.linear_model import Ridge
-from sklearn.pipeline import make_pipeline
-from sklearn.impute import SimpleImputer
 
 @dataclass
 class Results:
@@ -73,7 +71,6 @@ def run_backtest(config_path: str) -> Results:
     # 3) training/evaluation windows
     warmup = cfg["evaluation"]["warmup_months"]
     dates = df_ret.index
-    model = make_pipeline(SimpleImputer(strategy="mean"), Ridge(alpha=1.0))
 
     pnl, pnl_net = [], []
     turnover = []
@@ -152,11 +149,35 @@ def run_backtest(config_path: str) -> Results:
         # ---- end impute block ----
 
         # fit forecaster and predict mu_hat for asof (next month)
+        # select Ridge alpha on a small validation slice (last 24 months ≈ 24*len(sectors) rows)
+        alphas = [0.1, 1.0, 10.0]
+        best_alpha, best_score = 1.0, -1e9
+        rows_per_month = len(sectors)
+        if len(X_train) > 24 * rows_per_month:
+            split = len(X_train) - 24 * rows_per_month
+            X_tr, y_tr = X_train[:split], y_train[:split]
+            X_va, y_va = X_train[split:], y_train[split:]
+            for a in alphas:
+                m = Ridge(alpha=a)
+                m.fit(X_tr, y_tr)
+                preds_va = m.predict(X_va)
+                # correlation as a simple, scale-free score
+                v = np.corrcoef(preds_va, y_va)[0, 1]
+                if np.isnan(v):
+                    v = -1.0
+                if v > best_score:
+                    best_score, best_alpha = v, a
+        else:
+            best_alpha = 1.0
+        model = Ridge(alpha=best_alpha)
         model.fit(X_train, y_train)
         row_t = X.loc[asof].reindex(sectors).fillna(0.0).values
         if np.isnan(row_t).any():
             raise RuntimeError(f"NaNs in as-of features at {asof.date()} after fillna(0.0)")
         mu_hat = model.predict(row_t)
+        # cross-sectional standardize and clip for stable overlay behavior
+        mu_hat = (mu_hat - mu_hat.mean()) / (mu_hat.std() + 1e-12)
+        mu_hat = np.clip(mu_hat, -3.0, 3.0)
 
         # store predictions for auditing
         preds[asof] = pd.Series(mu_hat, index=sectors)
