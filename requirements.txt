@@ -7,3 +7,4 @@ pyyaml
 matplotlib
 networkx
 pyarrow
+yfinance
