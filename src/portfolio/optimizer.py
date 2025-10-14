@@ -65,4 +65,28 @@ def solve_overlay(mu_hat: np.ndarray,
     a_new  = w_target - w_bench
     a_smooth = lam * a_prev + (1 - lam) * a_new
     w_final  = _project_simplex(w_bench + a_smooth)
+
+    # --- Rescale after smoothing to hit TE target (soft) ---
+    d = w_final - w_bench
+    if np.linalg.norm(d, 1) > 1e-12:
+        # bisection on gamma in w_bench + gamma * d
+        low, high = 0.0, 2.5
+        for _ in range(20):
+            mid = 0.5 * (low + high)
+            w_try = _project_simplex(w_bench + mid * d)
+            te = _tracking_error(w_try - w_bench, Sigma)
+            if te > te_target_annual:
+                high = mid
+            else:
+                low = mid
+        w_final = _project_simplex(w_bench + low * d)
+
+        # re-enforce turnover cap relative to previous weights
+        delta = w_final - w_prev
+        one_way = 0.5 * np.sum(np.abs(delta)) * 2
+        if one_way > turnover_cap:
+            scale = turnover_cap / (one_way + 1e-12)
+            w_final = w_prev + scale * delta
+            w_final = _project_simplex(w_final)
+
     return w_final
