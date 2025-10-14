@@ -30,6 +30,50 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+# === Stronger stats helpers: Block-IR and HAC t-stat ===
+
+def _block_ir(series: "pd.Series", block: int = 12):
+    """Compute non-overlapping block IRs over monthly returns.
+    Returns dict with mean/median and count of blocks.
+    IR per block = mean(block)/std(block) * sqrt(12).
+    """
+    x = pd.Series(series).dropna().astype(float).values
+    n = len(x)
+    if n < block:
+        return {"ir_mean": np.nan, "ir_median": np.nan, "blocks": 0}
+    m = n // block
+    X = x[: m * block].reshape(m, block)
+    sd = X.std(axis=1, ddof=1)
+    ir_blocks = np.where(sd > 0, (X.mean(axis=1) / sd) * np.sqrt(12.0), np.nan)
+    return {
+        "ir_mean": float(np.nanmean(ir_blocks)) if np.isfinite(ir_blocks).any() else np.nan,
+        "ir_median": float(np.nanmedian(ir_blocks)) if np.isfinite(ir_blocks).any() else np.nan,
+        "blocks": int(m),
+    }
+
+
+def _hac_tstat_mean(series: "pd.Series", max_lag: int = 6):
+    """Newey–West (HAC) t-stat for the mean of a monthly-return series.
+    Bartlett weights; variance of sqrt(n)*mean = S; var(mean) = S/n; t = sqrt(n)*mean / sqrt(S).
+    """
+    x = pd.Series(series).dropna().astype(float).values
+    n = len(x)
+    if n == 0:
+        return np.nan
+    mu = x.mean()
+    xc = x - mu
+    gamma0 = (xc @ xc) / n  # γ_0
+    S = gamma0
+    L = min(max_lag, n - 1) if n > 1 else 0
+    for l in range(1, L + 1):
+        cov = (xc[l:] @ xc[:-l]) / n
+        w = 1.0 - l / (L + 1.0)  # Bartlett weight
+        S += 2.0 * w * cov
+    if S <= 0:
+        return np.nan
+    t = (np.sqrt(n) * mu) / np.sqrt(S)
+    return float(t)
+
 # Internal helpers from your repo
 from src.data import master_api
 from src.risk.cov import estimate_cov
@@ -193,6 +237,60 @@ def plot_weights_heatmap(weights: pd.DataFrame, outfile: str):
     plt.close()
 
 
+# === New helpers: drawdown & alpha diagnostics ===
+def compute_drawdown(active_net: pd.Series) -> pd.Series:
+    eq = (1.0 + active_net).cumprod()
+    peak = eq.cummax()
+    dd = eq / peak - 1.0  # negative or 0
+    dd.name = "drawdown"
+    return dd
+
+
+def plot_drawdown(active_net: pd.Series, outfile: str):
+    dd = compute_drawdown(active_net)
+    plt.figure(figsize=(10, 4))
+    plt.plot(dd.index, dd.values)
+    plt.title("Active Drawdown (Net)")
+    plt.xlabel("Date")
+    plt.ylabel("Drawdown")
+    plt.tight_layout()
+    plt.savefig(outfile, dpi=120)
+    plt.close()
+
+
+def plot_alpha_diagnostics(outfile_hist: str, outfile_line: str):
+    path = os.path.join("output", "chosen_alpha.csv")
+    if not os.path.exists(path):
+        print("[REPORT] chosen_alpha.csv not found — skipping alpha plots")
+        return
+    s = pd.read_csv(path, index_col=0, parse_dates=True).iloc[:, 0]
+    s.name = "ridge_alpha"
+
+    # histogram
+    plt.figure(figsize=(6, 4))
+    try:
+        # bins chosen to separate our {0.1, 1.0, 10.0}
+        plt.hist(s.values, bins=[0.05, 0.15, 0.5, 1.5, 5, 15], align="left", rwidth=0.8)
+    except Exception:
+        plt.hist(s.values, bins=10)
+    plt.title("Chosen Ridge α — Histogram")
+    plt.xlabel("alpha bins")
+    plt.ylabel("count")
+    plt.tight_layout()
+    plt.savefig(outfile_hist, dpi=120)
+    plt.close()
+
+    # line plot
+    plt.figure(figsize=(10, 4))
+    plt.plot(s.index, s.values)
+    plt.title("Chosen Ridge α by Month")
+    plt.xlabel("Date")
+    plt.ylabel("alpha")
+    plt.tight_layout()
+    plt.savefig(outfile_line, dpi=120)
+    plt.close()
+
+
 def main():
     _ensure_output_dir()
     cfg = _read_config("config/default.yaml")
@@ -219,18 +317,33 @@ def main():
     plot_turnover(turnover, "output/report_turnover.png")
     plot_weights_heatmap(weights, "output/report_weights_heatmap.png")
 
-    # Summary CSV
-    summary = pd.DataFrame(
-        [
-            {
-                "IR_net_full": ir_full,
-                "TE_ann_mean": te_series.mean(),
-                "TE_ann_median": te_series.median(),
-                "Turnover_mean": turnover.mean(),
-                "Obs_active": len(active_net),
-            }
-        ]
-    )
+    # New: drawdown & alpha diagnostics
+    plot_drawdown(active_net, "output/report_active_drawdown.png")
+    plot_alpha_diagnostics("output/report_alpha_hist.png", "output/report_alpha_line.png")
+
+    # Compute max drawdown for summary
+    dd = compute_drawdown(active_net)
+    max_dd = float(dd.min()) if not dd.empty else float("nan")
+
+    # Summary CSV (extended)
+    alpha_count = None
+    if os.path.exists("output/chosen_alpha.csv"):
+        try:
+            alpha_count = len(pd.read_csv("output/chosen_alpha.csv"))
+        except Exception:
+            alpha_count = None
+
+    summary = pd.DataFrame([
+        {
+            "IR_net_full": ir_full,
+            "TE_ann_mean": te_series.mean(),
+            "TE_ann_median": te_series.median(),
+            "Turnover_mean": turnover.mean(),
+            "MaxDD_active": max_dd,
+            "Alpha_records": alpha_count,
+            "Obs_active": len(active_net),
+        }
+    ])
     summary.to_csv("output/report_summary.csv", index=False)
 
     print("[REPORT] Saved:")
@@ -240,8 +353,66 @@ def main():
     print("  - output/report_turnover.png")
     print("  - output/report_weights_heatmap.png")
     print("  - output/report_summary.csv")
+    print("  - output/report_active_drawdown.png")
+    print("  - output/report_alpha_hist.png")
+    print("  - output/report_alpha_line.png")
     print(f"IR net (full): {ir_full:.2f} | TE mean: {te_series.mean():.2%} | Turnover mean: {turnover.mean():.2%}")
 
 
 if __name__ == "__main__":
     main()
+
+
+if __name__ == "__main__":
+    # === Stronger stats: Block-IR(12m) and HAC t-stat ===
+    try:
+        # robust read of output/active_net.csv (date in col0, value in col1)
+        _p = "output/active_net.csv"
+        try:
+            df_active = pd.read_csv(_p)
+            if df_active.shape[1] >= 2:
+                dates = pd.to_datetime(df_active.iloc[:, 0])
+                vals = pd.to_numeric(df_active.iloc[:, 1], errors="coerce")
+                active_net = pd.Series(vals.values, index=dates).sort_index()
+            else:
+                raise ValueError("active_net.csv has too few columns")
+        except Exception:
+            # fallback to header-less
+            df_active = pd.read_csv(_p, header=None)
+            dates = pd.to_datetime(df_active.iloc[:, 0])
+            vals = pd.to_numeric(df_active.iloc[:, 1], errors="coerce")
+            active_net = pd.Series(vals.values, index=dates).sort_index()
+
+        blk12 = _block_ir(active_net, block=12)
+        hac6  = _hac_tstat_mean(active_net, max_lag=6)
+        hac12 = _hac_tstat_mean(active_net, max_lag=12)
+
+        row = {
+            "BlockIR12_mean": blk12["ir_mean"],
+            "BlockIR12_median": blk12["ir_median"],
+            "BlockIR12_count": blk12["blocks"],
+            "HAC_t_lag6": hac6,
+            "HAC_t_lag12": hac12,
+        }
+
+        summary_path = "output/report_summary.csv"
+        if os.path.exists(summary_path):
+            try:
+                S = pd.read_csv(summary_path)
+                if len(S) == 0:
+                    S = pd.DataFrame([row])
+                else:
+                    for k, v in row.items():
+                        S[k] = [v]
+            except Exception:
+                S = pd.DataFrame([row])
+        else:
+            S = pd.DataFrame([row])
+
+        S.to_csv(summary_path, index=False)
+        print(
+            f"[REPORT] BlockIR12 mean={row['BlockIR12_mean']:.3f}, median={row['BlockIR12_median']:.3f}, n={row['BlockIR12_count']} | "
+            f"HAC t-stat (L=6)={row['HAC_t_lag6']:.2f}, (L=12)={row['HAC_t_lag12']:.2f}"
+        )
+    except Exception as _e:
+        print(f"[WARN] Stronger stats computation skipped: {_e}")
