@@ -25,6 +25,31 @@ def run_backtest(config_path: str) -> Results:
     set_seed(cfg["seed"])
     start, end = cfg["dates"]["start"], cfg["dates"]["end"]
 
+    # ---- mtime guard: warn if benchmark/labels are stale vs raw CSV or returns ----
+    def _mtime(path: str):
+        try:
+            return os.path.getmtime(path)
+        except Exception:
+            return None
+
+    raw_csv      = "data/raw/spx_sector_weights_monthly.csv"
+    bench_parq   = "data/master/benchmark/bench_weights_m.parquet"
+    labels_parq  = "data/master/labels/forward_returns/fwd_excess_1m.parquet"
+    returns_parq = "data/master/prices/returns_m/returns_m.parquet"
+
+    mt_raw     = _mtime(raw_csv)
+    mt_bench   = _mtime(bench_parq)
+    mt_labels  = _mtime(labels_parq)
+    mt_returns = _mtime(returns_parq)
+
+    if mt_raw and mt_bench and mt_raw > mt_bench:
+        print("[WARN] Benchmark parquet is older than raw SPX CSV — run: python -m scripts.build_spx_benchmark")
+
+    if mt_bench and mt_labels and mt_bench > mt_labels:
+        print("[WARN] Labels parquet is older than benchmark — run: python -m scripts.build_labels_forward")
+    if mt_returns and mt_labels and mt_returns > mt_labels:
+        print("[WARN] Labels parquet may be stale vs returns — run: python -m scripts.build_labels_forward")
+
     # 1) load returns & benchmark weights based on data source
     data_cfg    = cfg.get("data", {})
     data_source = data_cfg.get("source", "csv")
@@ -85,6 +110,9 @@ def run_backtest(config_path: str) -> Results:
     te_target = cfg["portfolio"]["te_target_annual"]
     to_cap    = cfg["portfolio"]["turnover_cap"]
     lam       = cfg["portfolio"]["smoothing_lambda"]
+
+    # log chosen Ridge alpha per month (for reporting)
+    alpha_chosen = {}
 
     for t in range(warmup, len(dates)-1):
         asof = dates[t]
@@ -150,7 +178,7 @@ def run_backtest(config_path: str) -> Results:
 
         # fit forecaster and predict mu_hat for asof (next month)
         # select Ridge alpha on a small validation slice (last 24 months ≈ 24*len(sectors) rows)
-        alphas = [0.1, 1.0, 10.0]
+        alphas = [0.3, 1.0, 3.0, 10.0]
         best_alpha, best_score = 1.0, -1e9
         rows_per_month = len(sectors)
         if len(X_train) > 24 * rows_per_month:
@@ -171,6 +199,8 @@ def run_backtest(config_path: str) -> Results:
             best_alpha = 1.0
         model = Ridge(alpha=best_alpha)
         model.fit(X_train, y_train)
+        # record the alpha selected for this month
+        alpha_chosen[asof] = float(best_alpha)
         row_t = X.loc[asof].reindex(sectors).fillna(0.0).values
         if np.isnan(row_t).any():
             raise RuntimeError(f"NaNs in as-of features at {asof.date()} after fillna(0.0)")
@@ -225,6 +255,16 @@ def run_backtest(config_path: str) -> Results:
 
     pnl = pd.concat(pnl) ; pnl_net = pd.concat(pnl_net)
     turnover = pd.concat(turnover) ; te_ann = pd.concat(te_ann)
+
+    # ---- save chosen alphas per month for diagnostics/reporting ----
+    try:
+        os.makedirs("output", exist_ok=True)
+        s_alpha = pd.Series(alpha_chosen)
+        s_alpha.index = pd.to_datetime(s_alpha.index)
+        s_alpha.sort_index().to_csv("output/chosen_alpha.csv")
+        print("[INFO] Saved chosen Ridge alphas to output/chosen_alpha.csv")
+    except Exception as e:
+        print(f"[WARN] Could not write chosen_alpha.csv: {e}")
 
     # ---- save monthly predictions to CSV ----
     try:
