@@ -5,6 +5,11 @@ import numpy as np
 import pandas as pd
 from typing import List, Optional
 
+
+def _require(path: str) -> None:
+    if not os.path.exists(path):
+        raise FileNotFoundError(path)
+
 def _assets(root: str) -> pd.DataFrame:
     path = os.path.join(root, "assets", "assets.parquet")
     df = pd.read_parquet(path)
@@ -21,7 +26,9 @@ def _ticker_to_asset_id_map(root: str) -> dict:
 # ---------- RETURNS ----------
 def load_returns_wide(root: str, sectors: List[str]) -> pd.DataFrame:
     """Wide returns (dates × sectors), columns ordered by 'sectors' list."""
-    t = pd.read_parquet(os.path.join(root, "prices", "returns_m", "returns_m.parquet"))
+    path = os.path.join(root, "prices", "returns_m", "returns_m.parquet")
+    _require(path)
+    t = pd.read_parquet(path)
     id2tkr = _asset_id_to_ticker_map(root)
     R = t.pivot(index="month_end", columns="asset_id", values="r_m").sort_index()
     R.columns = [id2tkr.get(int(c), f"id{int(c)}") for c in R.columns]
@@ -30,7 +37,31 @@ def load_returns_wide(root: str, sectors: List[str]) -> pd.DataFrame:
 
 # ---------- BENCH WEIGHTS ----------
 def load_benchmark_weights_wide(root: str, sectors: List[str]) -> pd.DataFrame:
-    t = pd.read_parquet(os.path.join(root, "portfolio", "bench_weights_m", "bench_weights_m.parquet"))
+    """
+    Load benchmark weights as a wide (date × sector) DataFrame. Supports both the
+    newer wide parquet written by ``build_spx_benchmark`` and the legacy tall table
+    produced by ``build_bench_weights_m``.
+    """
+    wide_path = os.path.join(root, "benchmark", "bench_weights_m.parquet")
+    tall_path = os.path.join(root, "portfolio", "bench_weights_m", "bench_weights_m.parquet")
+
+    if os.path.exists(wide_path):
+        df = pd.read_parquet(wide_path)
+        if "month_end" in df.columns:
+            df = df.set_index("month_end")
+        df.index = pd.to_datetime(df.index)
+        keep = [c for c in sectors if c in df.columns]
+        missing = [c for c in sectors if c not in df.columns]
+        if missing:
+            raise ValueError(
+                "Benchmark parquet missing sectors: "
+                + ", ".join(missing)
+                + f". Available columns: {sorted(df.columns)}"
+            )
+        return df[keep].astype("float64")
+
+    _require(tall_path)
+    t = pd.read_parquet(tall_path)
     id2tkr = _asset_id_to_ticker_map(root)
     W = t.pivot(index="month_end", columns="asset_id", values="w_bench").sort_index()
     W.columns = [id2tkr.get(int(c), f"id{int(c)}") for c in W.columns]
@@ -43,6 +74,7 @@ def load_features_panel(root: str, feature_names: List[str], version: str, secto
     Return a DataFrame indexed by (date, sector_ticker) with columns = feature_names (wide).
     """
     path = os.path.join(root, "features", "monthly", "features_monthly.parquet")
+    _require(path)
     F = pd.read_parquet(path)
     if feature_names:
         F = F[F["feature"].isin(feature_names)]
@@ -64,6 +96,8 @@ def load_cov(root: str, asof: pd.Timestamp, sectors: List[str]) -> Optional[np.n
     Load a covariance matrix (len(sectors) × len(sectors)) for 'asof'. Return None if not found.
     """
     path = os.path.join(root, "risk", "cov_m", "cov_m.parquet")
+    if not os.path.exists(path):
+        return None
     cov = pd.read_parquet(path)
     sub = cov[cov["month_end"] == asof]
     if sub.empty:

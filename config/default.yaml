@@ -1,35 +1,73 @@
 seed: 42
 dates:
-  start: "2005-01-31"
-  end:   "2024-12-31"
+  start: '2005-01-31'
+  end: '2024-12-31'
 data:
-  source: "master"                          # "master" | "csv" | "synthetic"
-  csv_folder: "data/raw/sector_etf_prices_monthly.csv"
-  master_root: "data/master"
+  source: master
+  csv_folder: data/raw/sector_etf_prices_monthly.csv
+  master_root: data/master
 universe:
-  sectors: ["XLY","XLP","XLE","XLF","XLV","XLI","XLB","XLK","XLU","XLRE","XLC"]  # 11 sectors (SPDR tickers)
+  sectors:
+  - XLY
+  - XLP
+  - XLE
+  - XLF
+  - XLV
+  - XLI
+  - XLB
+  - XLK
+  - XLU
+  - XLRE
+  - XLC
 portfolio:
-  te_target_annual: 0.071       # ~5.5% tracking error target
-  turnover_cap: 0.35            # 35% one-way cap per month
-  smoothing_lambda: 0.30        # EMA on active weights
-  crisis_vix_threshold: 35.0    # if VIX > 35, use lower lambda (0.1 inside code)
+  te_target_annual: 0.071
+  turnover_cap: 0.35
+  smoothing_lambda: 0.3
+  crisis_vix_threshold: 35.0
 costs:
-  one_way_bps: 2.0              # 2 bps per one-way trade (conservative)
+  one_way_bps: 2.0
 evaluation:
-  warmup_months: 36
+  warmup_months: 24
   purge_months: 1
   embargo_months: 1
+model:
+  train_lookback_months: 84
+  min_lookback_months: 24
+  half_life_months: 12
+  alpha_grid:
+  - 0.0001
+  - 0.0003
+  - 0.001
+  - 0.003
+  - 0.01
+  - 0.03
+  - 0.1
+  - 0.3
+  - 1
+  - 3
+  - 10
+  - 30
+  - 100
+  selector_tail_months: 24
+  selector_half_life_months: 12
+  selector_metric: spearman_ic_median
+  alpha_improvement_min: 0.0
+  alpha_ema_beta: 0.5
+  prediction_transform: zscore
+  label_winsor_pct: 0.01
 features:
   names:
-    - mom_12_1
-    - mom_6_1
-    - mom_3_1
-    - vol_12
-    - vol_6
-    - g_deg_wpos_36m
-    - g_eigvec_wpos_36m
-    - g_cluster_wpos_36m
-    - cs_absdev_1m
-  version: "v1.0.0"
+  - mom_12_1
+  - mom_6_1
+  - mom_3_1
+  - vol_12
+  - vol_6
+  - g_deg_wpos_36m
+  - g_eigvec_wpos_36m
+  - g_cluster_wpos_36m
+  - cs_absdev_1m
+  version: v1.0.0
 risk:
-  fallback_lookback: 36      # Hybrid: use this if a DB covariance month is missing
+  fallback_lookback: 36
+runtime:
+  turnover_eps: 0.005
