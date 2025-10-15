@@ -23,7 +23,8 @@ def solve_overlay(mu_hat: np.ndarray,
                   te_target_annual: float,
                   turnover_cap: float,
                   smoothing_lambda: float,
-                  crisis: bool) -> np.ndarray:
+                  crisis: bool,
+                  turnover_eps: float = 0.0) -> np.ndarray:
     """
     Simple, fast overlay: scale mu_hat to hit TE target, then enforce long-only and turnover cap.
     """
@@ -54,6 +55,9 @@ def solve_overlay(mu_hat: np.ndarray,
 
     # 2) turnover cap: limit movement from w_prev
     delta = w_target - w_prev
+    if turnover_eps > 0:
+        delta = delta.copy()
+        delta[np.abs(delta) < turnover_eps] = 0.0
     one_way = 0.5 * np.sum(np.abs(delta)) * 2  # = sum positive changes
     if one_way > turnover_cap:
         scale = turnover_cap / (one_way + 1e-12)
