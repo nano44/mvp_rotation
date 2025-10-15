@@ -11,15 +11,17 @@ __pycache__/
 .vscode/
 .idea/
 
-# Project artifacts (root only)
- /data/
- /output/
+# Project artifacts / generated data
+output/
+.cache/
+artifacts/
+data/master/
+data/interim/
+
 # Generated artifacts
-data/master/**/*.parquet
 output/**
 **/__pycache__/
 *.pyc
 repo_snapshot.txt
 
-# local raw data (keep out of git)
-data/raw/*.csv
+# Local raw data (tracked CSVs remain; add patterns here if new files should be excluded)

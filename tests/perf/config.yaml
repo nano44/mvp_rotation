@@ -1,0 +1,13 @@
+tier_settings:
+  smoke:
+    history_months: 24
+    bootstrap_draws: 0
+    time_budget_minutes: 7
+  regression:
+    history_months: null
+    bootstrap_draws: 1000
+    time_budget_minutes: 20
+  full:
+    history_months: null
+    bootstrap_draws: 2000
+    time_budget_minutes: 45

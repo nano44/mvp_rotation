@@ -1,0 +1,84 @@
+name: Strategy Performance Checks
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+
+jobs:
+  perf-smoke:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Restore baseline cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/perf
+          key: perf-smoke-${{ github.event.pull_request.base.sha }}
+          restore-keys: |
+            perf-smoke-
+      - name: Run smoke performance check
+        env:
+          PYTHONHASHSEED: "0"
+          NUMPY_SEED: "1234"
+        run: python tests/run_perf.py --tier smoke --ref ${{ github.event.pull_request.base.sha }} --cmp HEAD --artifacts-dir artifacts
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-smoke
+          path: artifacts
+      - name: Comment on PR
+        if: always()
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: perf-check
+          recreate: true
+          message: |
+            $(cat artifacts/pr_comment.md)
+
+  perf-full:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: "pip"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Restore performance cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/perf
+          key: perf-full-${{ github.sha }}
+          restore-keys: |
+            perf-full-
+      - name: Run full performance comparison vs prior main
+        env:
+          PYTHONHASHSEED: "0"
+          NUMPY_SEED: "1234"
+        run: |
+          git fetch origin main --depth=1
+          python tests/run_perf.py --tier full --ref origin/main^ --cmp HEAD --artifacts-dir artifacts
+      - name: Upload full artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: perf-full
+          path: artifacts
